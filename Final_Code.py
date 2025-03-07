@@ -3,6 +3,11 @@ import telebot
 from telebot import types
 import random
 import psycopg2
+import logging
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Чтение конфигурации
 configparser = configparser.ConfigParser()
@@ -33,7 +38,6 @@ def connect_db():
 def create_tables():
     with connect_db() as conn:
         with conn.cursor() as cur:
-            # Исправлено: user_id как BIGINT PRIMARY KEY
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users(
                 user_id BIGINT PRIMARY KEY,
@@ -87,12 +91,12 @@ def send_welcome(message):
     user_name = message.from_user.username
     chat_id = message.chat.id
 
-    # Добавление пользователя в БД с явным указанием user_id
+    # Добавление пользователя в БД с обработкой конфликта по chat_id
     with connect_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO users (user_id, user_name, chat_id)
-                VALUES (%s, %s, %s) 
+                VALUES (%s, %s, %s)
                 ON CONFLICT (chat_id) DO NOTHING;
             """, (user_id, user_name, chat_id))
             conn.commit()
@@ -169,11 +173,11 @@ def check_answer(message, word_id, correct_translation):
         # Гарантируем существование пользователя в БД
         with connect_db() as conn:
             with conn.cursor() as cur:
-                # Добавляем пользователя если его нет
+                # Добавляем пользователя, если его нет (обрабатываем конфликт по chat_id)
                 cur.execute("""
                     INSERT INTO users (user_id, user_name, chat_id)
                     VALUES (%s, %s, %s)
-                    ON CONFLICT (user_id) DO NOTHING;
+                    ON CONFLICT (chat_id) DO NOTHING;
                 """, (user_id, message.from_user.username, message.chat.id))
                 
                 # Добавляем связь пользователь-слово
@@ -184,7 +188,7 @@ def check_answer(message, word_id, correct_translation):
                 """, (user_id, word_id))
                 conn.commit()
 
-        bot.send_message(chat_id, "✅ Правильно! Молодец!")
+        bot.send_message(chat_id, "Правильно! Молодец!")
 
     elif user_answer == 'Дальше':
         start_quiz(message)
@@ -197,11 +201,11 @@ def check_answer(message, word_id, correct_translation):
                 prev_word = user_word_history[user_id][-1]
                 ask_question(message.chat.id, prev_word[0], prev_word[1], prev_word[2])
             else:
-                bot.send_message(chat_id, "⏮ Нет предыдущих слов")
+                bot.send_message(chat_id, "Нет предыдущих слов")
         else:
-            bot.send_message(chat_id, "⏮ История слов пуста")
+            bot.send_message(chat_id, "История слов пуста")
     else:
-        bot.send_message(chat_id, "❌ Неправильно. Попробуйте ещё раз!")
+        bot.send_message(chat_id, "Неправильно. Попробуйте ещё раз!")
 
 def ask_question(chat_id, word_id, russian_word, correct_translation):
     with connect_db() as conn:
@@ -272,17 +276,15 @@ def process_delete_word(message):
                         WHERE user_id = %s AND word_id = %s;
                     """, (user_id, word_id))
                     conn.commit()
-                    bot.send_message(message.chat.id, f"✅ Слово '{russian_word}' удалено из вашего списка!")
+                    bot.send_message(message.chat.id, f"Слово '{russian_word}' удалено из вашего списка!")
                 else:
-                    bot.send_message(message.chat.id, f"⚠️ Слово '{russian_word}' не найдено")
+                    bot.send_message(message.chat.id, f"Слово '{russian_word}' не найдено")
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
+        bot.send_message(message.chat.id, f"Ошибка: {e}")
 
 if __name__ == "__main__":
     # Инициализация БД
-    create_tables()
-    fill_words_DB()
     
     # Запуск бота
-    print("🟢 Бот запущен")
+    logger.info("Бот запущен")
     bot.polling(none_stop=True)
