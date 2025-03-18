@@ -49,7 +49,8 @@ def create_tables():
                 CREATE TABLE IF NOT EXISTS words(
                 word_id SERIAL PRIMARY KEY,
                 russian_word TEXT NOT NULL,
-                english_translation TEXT NOT NULL
+                english_translation TEXT NOT NULL,
+                UNIQUE (russian_word, english_translation)
                 );
             """)
             cur.execute("""
@@ -78,11 +79,22 @@ def fill_words_DB():
     ]
     with connect_db() as conn:
         with conn.cursor() as cur:
-            cur.executemany("""
-                INSERT INTO words (russian_word, english_translation)
-                VALUES (%s, %s);
-            """, initial_words)
+            for russian_word, english_translation in initial_words:
+                cur.execute("""
+                    INSERT INTO words (russian_word, english_translation)
+                    VALUES (%s, %s)
+                    ON CONFLICT (russian_word, english_translation) DO NOTHING;
+                """, (russian_word, english_translation))
             conn.commit()
+
+# Функция для создания основного меню с кнопками
+def create_main_menu():
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    quiz_btn = types.KeyboardButton('Квиз')
+    btn_add_word = types.KeyboardButton('Добавить слово')
+    btn_del_word = types.KeyboardButton('Удалить слово')
+    markup.add(quiz_btn, btn_add_word, btn_del_word)
+    return markup
 
 # Обработчик команды /start
 @bot.message_handler(commands=['start'])
@@ -101,13 +113,36 @@ def send_welcome(message):
             """, (user_id, user_name, chat_id))
             conn.commit()
 
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    quiz_btn = types.KeyboardButton('Квиз')
-    btn_add_word = types.KeyboardButton('Добавить слово')
-    btn_del_word = types.KeyboardButton('Удалить слово')
-    markup.add(quiz_btn, btn_add_word, btn_del_word)
+    # Отправка приветственного сообщения с основным меню
+    bot.send_message(chat_id, f"Привет, {user_name}! Я учебный бот по изучению английских слов. Давай приступим!", reply_markup=create_main_menu())
 
-    bot.send_message(chat_id, f"Привет, {user_name}! Я учебный бот по изучению английских слов. Давай приступим!", reply_markup=markup)
+# Обработчик команды /add_word
+@bot.message_handler(commands=['add_word'])
+def add_word_command(message):
+    msg = bot.send_message(message.chat.id, "📝 Введите слово на русском и перевод через дефис (пример: машина-car):")
+    bot.register_next_step_handler(msg, process_add_word)
+
+# Обработчик кнопки "Добавить слово"
+@bot.message_handler(func=lambda message: message.text == 'Добавить слово')
+def add_word_button(message):
+    msg = bot.send_message(message.chat.id, "📝 Введите слово на русском и перевод через дефис (пример: машина-car):")
+    bot.register_next_step_handler(msg, process_add_word)
+
+# Функция обработки добавления слова
+def process_add_word(message):
+    try:
+        russian_word, english_translation = message.text.split('-')
+        with connect_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO words (russian_word, english_translation)
+                    VALUES (%s, %s)
+                    ON CONFLICT (russian_word, english_translation) DO NOTHING;
+                """, (russian_word.strip(), english_translation.strip()))
+                conn.commit()
+        bot.send_message(message.chat.id, "✅ Слово успешно добавлено!", reply_markup=create_main_menu())
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {e}\nПроверьте формат ввода!", reply_markup=create_main_menu())
 
 # Обработчик кнопки "Квиз"
 @bot.message_handler(func=lambda message: message.text == 'Квиз')
@@ -150,7 +185,7 @@ def start_quiz(message):
                 options = wrong_translations + [correct_translation]
                 random.shuffle(options)
 
-                # Создаем клавиатуру
+                # Создаем клавиатуру для квиза
                 markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
                 for option in options:
                     markup.add(types.KeyboardButton(option))
@@ -162,7 +197,7 @@ def start_quiz(message):
                     lambda msg: check_answer(msg, word_id, correct_translation)
                 )
             else:
-                bot.send_message(chat_id, "Вы изучили все слова! Добавьте новые слова с помощью команды /add_word.")
+                bot.send_message(chat_id, "Вы изучили все слова! Добавьте новые слова с помощью кнопки 'Добавить слово'.", reply_markup=create_main_menu())
 
 def check_answer(message, word_id, correct_translation):
     user_id = message.from_user.id
@@ -173,6 +208,19 @@ def check_answer(message, word_id, correct_translation):
         # Добавляем связь пользователь-слово
         with connect_db() as conn:
             with conn.cursor() as cur:
+                # Проверяем, существует ли пользователь в таблице users
+                cur.execute("""
+                    SELECT user_id FROM users WHERE user_id = %s;
+                """, (user_id,))
+                if cur.fetchone() is None:
+                    # Если пользователя нет, добавляем его
+                    cur.execute("""
+                        INSERT INTO users (user_id, user_name, chat_id)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (chat_id) DO NOTHING;
+                    """, (user_id, message.from_user.username, chat_id))
+                    conn.commit()
+
                 cur.execute("""
                     INSERT INTO user_word (user_id, word_id)
                     VALUES (%s, %s)
@@ -180,7 +228,8 @@ def check_answer(message, word_id, correct_translation):
                 """, (user_id, word_id))
                 conn.commit()
 
-        bot.send_message(chat_id, "✅ Правильно! Молодец!")
+        bot.send_message(chat_id, "✅ Правильно! Молодец!", reply_markup=create_main_menu())
+        start_quiz(message)  # Переход к следующему слову
 
     elif user_answer == 'Дальше':
         start_quiz(message)
@@ -193,11 +242,11 @@ def check_answer(message, word_id, correct_translation):
                 prev_word = user_word_history[user_id][-1]
                 ask_question(message.chat.id, prev_word[0], prev_word[1], prev_word[2])
             else:
-                bot.send_message(chat_id, "⏮ Нет предыдущих слов")
+                bot.send_message(chat_id, "⏮ Нет предыдущих слов", reply_markup=create_main_menu())
         else:
-            bot.send_message(chat_id, "⏮ История слов пуста")
+            bot.send_message(chat_id, "⏮ История слов пуста", reply_markup=create_main_menu())
     else:
-        bot.send_message(chat_id, "❌ Неправильно. Попробуйте ещё раз!")
+        bot.send_message(chat_id, "❌ Неправильно. Попробуйте ещё раз!", reply_markup=create_main_menu())
 
 def ask_question(chat_id, word_id, russian_word, correct_translation):
     with connect_db() as conn:
@@ -219,26 +268,6 @@ def ask_question(chat_id, word_id, russian_word, correct_translation):
             markup.add(types.KeyboardButton('Дальше'), types.KeyboardButton('Назад'))
 
             bot.send_message(chat_id, f"Как переводится слово {russian_word}?", reply_markup=markup)
-
-# Обработчик кнопки "Добавить слово"
-@bot.message_handler(func=lambda message: message.text == 'Добавить слово')
-def add_word(message):
-    msg = bot.send_message(message.chat.id, "📝 Введите слово на русском и перевод через дефис (пример: машина-car):")
-    bot.register_next_step_handler(msg, process_add_word)
-
-def process_add_word(message):
-    try:
-        russian_word, english_translation = message.text.split('-')
-        with connect_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO words (russian_word, english_translation)
-                    VALUES (%s, %s);
-                """, (russian_word.strip(), english_translation.strip()))
-                conn.commit()
-        bot.send_message(message.chat.id, "✅ Слово успешно добавлено!")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка: {e}\nПроверьте формат ввода!")
 
 # Обработчик кнопки "Удалить слово"
 @bot.message_handler(func=lambda message: message.text == 'Удалить слово')
@@ -268,15 +297,17 @@ def process_delete_word(message):
                         WHERE user_id = %s AND word_id = %s;
                     """, (user_id, word_id))
                     conn.commit()
-                    bot.send_message(message.chat.id, f"✅ Слово '{russian_word}' удалено из вашего списка!")
+                    bot.send_message(message.chat.id, f"✅ Слово '{russian_word}' удалено из вашего списка!", reply_markup=create_main_menu())
                 else:
-                    bot.send_message(message.chat.id, f"⚠️ Слово '{russian_word}' не найдено")
+                    bot.send_message(message.chat.id, f"⚠️ Слово '{russian_word}' не найдено", reply_markup=create_main_menu())
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
+        bot.send_message(message.chat.id, f"❌ Ошибка: {e}", reply_markup=create_main_menu())
 
 if __name__ == "__main__":
     # Инициализация БД
-  
+    create_tables()
+    fill_words_DB()
+
     # Запуск бота
     logger.info("🟢 Бот запущен")
     bot.polling(none_stop=True)
